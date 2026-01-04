@@ -1,10 +1,10 @@
 #!/bin/bash
 # Ralph Wiggum: Stop Hook
-# Manages iteration completion and context lifecycle (malloc/free)
+# - ENFORCES test execution before allowing completion
+# - Manages iteration lifecycle
+# - Triggers Cloud Agent handoff if configured
 #
-# TWO MODES:
-# - Cloud Mode (True Ralph): Automatically spawns Cloud Agent with fresh context
-# - Local Mode (Assisted Ralph): Instructs human to start new conversation
+# Core Ralph principle: Tests determine completion, not the agent.
 
 set -euo pipefail
 
@@ -35,26 +35,43 @@ CONFIG_FILE="$WORKSPACE_ROOT/.cursor/ralph-config.json"
 
 # If Ralph isn't active, allow exit
 if [[ ! -f "$TASK_FILE" ]] || [[ ! -d "$RALPH_DIR" ]]; then
+  echo '{"decision": "stop"}'
   exit 0
 fi
 
-# Check if Cloud Agent mode is enabled
+# =============================================================================
+# EXTRACT TASK CONFIGURATION
+# =============================================================================
+
+# Get test command from YAML frontmatter
+TEST_COMMAND=""
+if grep -q "^test_command:" "$TASK_FILE" 2>/dev/null; then
+  TEST_COMMAND=$(grep "^test_command:" "$TASK_FILE" | sed 's/test_command: *//' | sed 's/^["'"'"']//' | sed 's/["'"'"']$//' | xargs)
+fi
+
+# Get max iterations
+MAX_ITERATIONS=$(grep '^max_iterations:' "$TASK_FILE" 2>/dev/null | sed 's/max_iterations: *//' || echo "0")
+
+# Get current state
+CURRENT_ITERATION=$(grep '^iteration:' "$STATE_FILE" 2>/dev/null | sed 's/iteration: *//' || echo "0")
+
+# Count unchecked criteria
+UNCHECKED_CRITERIA=$(grep -c '\- \[ \]' "$TASK_FILE" 2>/dev/null || echo "0")
+
+# =============================================================================
+# CLOUD MODE CHECK
+# =============================================================================
+
 is_cloud_enabled() {
-  # Check environment variable
   if [[ -n "${CURSOR_API_KEY:-}" ]]; then
     return 0
   fi
-  
-  # Check project config
   if [[ -f "$CONFIG_FILE" ]]; then
-    ENABLED=$(jq -r '.cloud_agent_enabled // false' "$CONFIG_FILE" 2>/dev/null)
     KEY=$(jq -r '.cursor_api_key // empty' "$CONFIG_FILE" 2>/dev/null)
-    if [[ "$ENABLED" == "true" ]] && [[ -n "$KEY" ]]; then
+    if [[ -n "$KEY" ]]; then
       return 0
     fi
   fi
-  
-  # Check global config
   GLOBAL_CONFIG="$HOME/.cursor/ralph-config.json"
   if [[ -f "$GLOBAL_CONFIG" ]]; then
     KEY=$(jq -r '.cursor_api_key // empty' "$GLOBAL_CONFIG" 2>/dev/null)
@@ -62,91 +79,46 @@ is_cloud_enabled() {
       return 0
     fi
   fi
-  
   return 1
 }
 
-# Get transcript path and read last output
-TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // ""')
+# =============================================================================
+# RUN TESTS (THE CORE OF RALPH)
+# =============================================================================
 
-LAST_OUTPUT=""
-if [[ -n "$TRANSCRIPT_PATH" ]] && [[ -f "$TRANSCRIPT_PATH" ]]; then
-  if grep -q '"role":"assistant"' "$TRANSCRIPT_PATH"; then
-    LAST_LINE=$(grep '"role":"assistant"' "$TRANSCRIPT_PATH" | tail -1)
-    LAST_OUTPUT=$(echo "$LAST_LINE" | jq -r '
-      .message.content |
-      map(select(.type == "text")) |
-      map(.text) |
-      join("\n")
-    ' 2>/dev/null || echo "")
+run_tests() {
+  local test_cmd="$1"
+  local workspace="$2"
+  
+  if [[ -z "$test_cmd" ]]; then
+    echo "NO_TEST_COMMAND"
+    return 0
   fi
-fi
-
-# Get current state
-CURRENT_ITERATION=$(grep '^iteration:' "$STATE_FILE" | sed 's/iteration: *//' || echo "0")
-
-# Extract max iterations from task file
-MAX_ITERATIONS=$(grep '^max_iterations:' "$TASK_FILE" | sed 's/max_iterations: *//' || echo "0")
+  
+  cd "$workspace"
+  
+  # Run test command and capture output
+  set +e
+  TEST_OUTPUT=$(eval "$test_cmd" 2>&1)
+  TEST_EXIT_CODE=$?
+  set -e
+  
+  if [[ $TEST_EXIT_CODE -eq 0 ]]; then
+    echo "PASS"
+    echo "$TEST_OUTPUT" > "$RALPH_DIR/.last_test_output"
+  else
+    echo "FAIL:$TEST_EXIT_CODE"
+    echo "$TEST_OUTPUT" > "$RALPH_DIR/.last_test_output"
+  fi
+}
 
 # =============================================================================
-# CHECK FOR COMPLETION SIGNALS
-# =============================================================================
-
-# Check for completion signal
-if echo "$LAST_OUTPUT" | grep -q "RALPH_COMPLETE"; then
-  echo "✅ Ralph: Task completed after $CURRENT_ITERATION iterations!"
-  
-  sedi "s/^status: .*/status: completed/" "$STATE_FILE"
-  
-  cat >> "$PROGRESS_FILE" <<EOF
-
----
-
-## 🎉 TASK COMPLETED
-
-- Total iterations: $CURRENT_ITERATION
-- Completed at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-- Mode: $(is_cloud_enabled && echo "Cloud" || echo "Local")
-
-EOF
-
-  exit 0
-fi
-
-# Check for gutter signal
-if echo "$LAST_OUTPUT" | grep -q "RALPH_GUTTER"; then
-  echo "🚨 Ralph: Gutter detected! Agent is stuck."
-  echo ""
-  echo "The agent has identified it's in a failure loop."
-  echo "Progress saved in .ralph/progress.md"
-  echo ""
-  echo "Recommended: Review the task and guardrails, then restart."
-  
-  sedi "s/^status: .*/status: gutter_detected/" "$STATE_FILE"
-  
-  exit 0
-fi
-
-# Check max iterations
-if [[ "$MAX_ITERATIONS" -gt 0 ]] && [[ "$CURRENT_ITERATION" -ge "$MAX_ITERATIONS" ]]; then
-  echo "🛑 Ralph: Max iterations ($MAX_ITERATIONS) reached."
-  echo ""
-  echo "Progress saved in .ralph/progress.md"
-  echo "To continue, increase max_iterations in RALPH_TASK.md"
-  
-  sedi "s/^status: .*/status: max_iterations_reached/" "$STATE_FILE"
-  
-  exit 0
-fi
-
-# =============================================================================
-# CHECK CONTEXT HEALTH (malloc tracking)
+# CHECK CONTEXT HEALTH
 # =============================================================================
 
 CONTEXT_CRITICAL=false
 GUTTER_RISK_HIGH=false
 
-# Check context health
 if [[ -f "$CONTEXT_LOG" ]]; then
   CONTEXT_STATUS=$(grep 'Status:' "$CONTEXT_LOG" | head -1 || echo "")
   if echo "$CONTEXT_STATUS" | grep -q "Critical"; then
@@ -154,7 +126,6 @@ if [[ -f "$CONTEXT_LOG" ]]; then
   fi
 fi
 
-# Check gutter risk from failures
 if [[ -f "$FAILURES_FILE" ]]; then
   GUTTER_RISK=$(grep 'Gutter risk:' "$FAILURES_FILE" | sed 's/.*Gutter risk: //' || echo "Low")
   if [[ "$GUTTER_RISK" == "HIGH" ]]; then
@@ -162,164 +133,249 @@ if [[ -f "$FAILURES_FILE" ]]; then
   fi
 fi
 
+ALLOCATED_TOKENS=$(grep 'Allocated:' "$CONTEXT_LOG" 2>/dev/null | grep -o '[0-9]*' | head -1 || echo "0")
+if [[ -z "$ALLOCATED_TOKENS" ]]; then
+  ALLOCATED_TOKENS=0
+fi
+
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 # =============================================================================
-# HANDLE CONTEXT LIMIT (malloc/free decision)
+# DECISION LOGIC
 # =============================================================================
 
-if [[ "$CONTEXT_CRITICAL" == "true" ]] || [[ "$GUTTER_RISK_HIGH" == "true" ]]; then
+# Case 1: All criteria appear checked - RUN TESTS TO VERIFY
+if [[ "$UNCHECKED_CRITERIA" -eq 0 ]]; then
   
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "⚠️  RALPH: CONTEXT LIMIT REACHED (malloc full)"
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo ""
-  
-  if [[ "$CONTEXT_CRITICAL" == "true" ]]; then
-    echo "Reason: Context window is critically full"
-  fi
-  if [[ "$GUTTER_RISK_HIGH" == "true" ]]; then
-    echo "Reason: High gutter risk (repeated failure patterns)"
-  fi
-  echo ""
-  
-  # Try Cloud Mode first
-  if is_cloud_enabled; then
-    echo "🚀 CLOUD MODE: Spawning new Cloud Agent with fresh context..."
-    echo ""
+  if [[ -n "$TEST_COMMAND" ]]; then
+    TEST_RESULT=$(run_tests "$TEST_COMMAND" "$WORKSPACE_ROOT")
+    TEST_OUTPUT=$(cat "$RALPH_DIR/.last_test_output" 2>/dev/null || echo "")
     
-    if "$SCRIPT_DIR/spawn-cloud-agent.sh" "$WORKSPACE_ROOT"; then
-      # Cloud agent spawned successfully
-      echo ""
-      echo "═══════════════════════════════════════════════════════════════════"
-      echo "✅ Context freed! Cloud Agent continuing with fresh malloc."
-      echo "═══════════════════════════════════════════════════════════════════"
+    if [[ "$TEST_RESULT" == "PASS" ]]; then
+      # Tests passed - ACTUALLY complete
+      cat >> "$PROGRESS_FILE" <<EOF
+
+---
+
+## 🎉 RALPH COMPLETE (Tests Verified)
+- Iteration: $CURRENT_ITERATION
+- Time: $TIMESTAMP
+- Test command: $TEST_COMMAND
+- Result: ✅ PASSED
+
+\`\`\`
+$TEST_OUTPUT
+\`\`\`
+
+EOF
       
-      # Allow exit - Cloud Agent takes over
+      cat > "$STATE_FILE" <<EOF
+---
+iteration: $CURRENT_ITERATION
+status: complete
+completed_at: $TIMESTAMP
+---
+
+# Ralph State
+
+✅ Task completed - verified by tests.
+EOF
+      
+      echo '{"decision": "stop"}'
       exit 0
+      
     else
-      echo ""
-      echo "⚠️  Cloud Agent spawn failed. Falling back to Local Mode."
-      echo ""
+      # Tests FAILED - agent lied or made a mistake
+      EXIT_CODE=$(echo "$TEST_RESULT" | sed 's/FAIL://')
+      
+      cat >> "$PROGRESS_FILE" <<EOF
+
+---
+
+### ❌ Tests FAILED (Iteration $CURRENT_ITERATION)
+- Time: $TIMESTAMP
+- Test command: $TEST_COMMAND
+- Exit code: $EXIT_CODE
+
+\`\`\`
+$TEST_OUTPUT
+\`\`\`
+
+**Criteria are checked but tests fail. The task is NOT complete.**
+
+EOF
+      
+      # Log failure
+      cat >> "$FAILURES_FILE" <<EOF
+
+## Test Failure at $TIMESTAMP
+- Command: $TEST_COMMAND
+- Exit code: $EXIT_CODE
+- Note: Agent marked criteria complete but tests fail
+
+EOF
+      
+      # Force continue - agent must fix
+      NEXT_ITERATION=$((CURRENT_ITERATION + 1))
+      
+      cat > "$STATE_FILE" <<EOF
+---
+iteration: $NEXT_ITERATION
+status: active
+started_at: $TIMESTAMP
+---
+
+# Ralph State
+
+Iteration $NEXT_ITERATION - Fixing test failures...
+EOF
+      
+      # Truncate test output for message if too long
+      SHORT_OUTPUT=$(echo "$TEST_OUTPUT" | head -50)
+      if [[ ${#TEST_OUTPUT} -gt ${#SHORT_OUTPUT} ]]; then
+        SHORT_OUTPUT="$SHORT_OUTPUT\n\n... (truncated, see .ralph/.last_test_output for full output)"
+      fi
+      
+      jq -n \
+        --arg output "$SHORT_OUTPUT" \
+        --arg cmd "$TEST_COMMAND" \
+        '{
+          "decision": "block",
+          "userMessage": "⚠️ Tests failed. Ralph is continuing to fix.",
+          "agentMessage": "🚨 TESTS FAILED - TASK IS NOT COMPLETE\n\nYou checked all criteria but the tests do not pass.\nTest command: " + $cmd + "\n\nOutput:\n" + $output + "\n\n**You must fix the code until tests pass. Run the test command after each fix to verify.**"
+        }'
+      exit 0
     fi
+    
+  else
+    # No test command - trust the checkboxes (not ideal)
+    cat >> "$PROGRESS_FILE" <<EOF
+
+---
+
+## 🎉 RALPH COMPLETE (No Test Verification)
+- Iteration: $CURRENT_ITERATION
+- Time: $TIMESTAMP
+- Warning: No test_command defined - completion not verified
+
+EOF
+    
+    cat > "$STATE_FILE" <<EOF
+---
+iteration: $CURRENT_ITERATION
+status: complete
+completed_at: $TIMESTAMP
+---
+
+# Ralph State
+
+✅ Task completed (unverified - no test command).
+EOF
+    
+    echo '{"decision": "stop"}'
+    exit 0
   fi
-  
-  # Local Mode - Human in the loop
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "📋 LOCAL MODE: Human action required to free context"
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo ""
-  echo "To continue with fresh context (complete the malloc/free cycle):"
-  echo ""
-  echo "  1. Your progress is saved in .ralph/progress.md"
-  echo "  2. START A NEW CONVERSATION in Cursor"
-  echo "  3. Tell Cursor: 'Continue the Ralph task from iteration $CURRENT_ITERATION'"
-  echo ""
-  echo "The new conversation = fresh context = malloc freed"
-  echo ""
-  echo "Why this matters:"
-  echo "  - LLM context is like memory: once allocated, it can't be freed"
-  echo "  - The only way to 'free' context is to start a new conversation"
-  echo "  - Your progress persists in FILES, not in context"
-  echo ""
-  
-  if ! is_cloud_enabled; then
-    echo "💡 TIP: Enable Cloud Mode for automatic context management"
-    echo "   Set CURSOR_API_KEY or add to .cursor/ralph-config.json"
-    echo "   Get your key: https://cursor.com/dashboard?tab=integrations"
-    echo ""
-  fi
-  
-  echo "═══════════════════════════════════════════════════════════════════"
-  
-  # Update state
-  sedi "s/^status: .*/status: awaiting_fresh_context/" "$STATE_FILE"
-  
-  # Log the pause
+fi
+
+# Case 2: Max iterations reached
+if [[ "$MAX_ITERATIONS" -gt 0 ]] && [[ "$CURRENT_ITERATION" -ge "$MAX_ITERATIONS" ]]; then
   cat >> "$PROGRESS_FILE" <<EOF
 
 ---
 
-## ⏸️ Context Limit Reached (Iteration $CURRENT_ITERATION)
-
-- Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-- Reason: $(if [[ "$CONTEXT_CRITICAL" == "true" ]]; then echo "Context critically full"; else echo "High gutter risk"; fi)
-- Mode: Local (human-in-the-loop)
-- Action needed: Start new conversation to free context
+## 🛑 Max Iterations Reached
+- Iteration: $CURRENT_ITERATION
+- Max allowed: $MAX_ITERATIONS
+- Criteria remaining: $UNCHECKED_CRITERIA
 
 EOF
-
-  # Allow exit - human needs to start new conversation
+  
+  sedi "s/^status: .*/status: max_iterations_reached/" "$STATE_FILE"
+  
+  echo '{"decision": "stop"}'
   exit 0
 fi
 
-# =============================================================================
-# NORMAL ITERATION CONTINUE (context still healthy)
-# =============================================================================
-
-NEXT_ITERATION=$((CURRENT_ITERATION + 1))
-
-# Check for failure patterns to add as guardrails
-if [[ -f "$FAILURES_FILE" ]]; then
-  RECENT_FAILURES=$(tail -20 "$FAILURES_FILE")
+# Case 3: Context critical or gutter risk - need fresh context
+if [[ "$CONTEXT_CRITICAL" == "true" ]] || [[ "$GUTTER_RISK_HIGH" == "true" ]]; then
   
-  if echo "$RECENT_FAILURES" | grep -q "Potential Thrashing"; then
-    THRASH_FILE=$(echo "$RECENT_FAILURES" | grep "File:" | tail -1 | sed 's/.*File: //')
-    
-    if [[ -n "$THRASH_FILE" ]]; then
-      cat >> "$GUARDRAILS_FILE" <<EOF
+  cat >> "$PROGRESS_FILE" <<EOF
 
-### Sign: Careful with $THRASH_FILE
-- **Added**: Iteration $CURRENT_ITERATION
-- **Reason**: Detected repeated edits without clear progress
-- **Instruction**: Before editing this file again, step back and reconsider the approach
+---
+
+## ⚠️ Context Limit (Iteration $CURRENT_ITERATION)
+- Time: $TIMESTAMP
+- Context: $ALLOCATED_TOKENS tokens
+- Gutter risk: $(grep 'Gutter risk:' "$FAILURES_FILE" 2>/dev/null | sed 's/.*Gutter risk: //' || echo "Low")
+- Criteria remaining: $UNCHECKED_CRITERIA
 
 EOF
+
+  # Try Cloud Mode
+  if is_cloud_enabled; then
+    if "$SCRIPT_DIR/spawn-cloud-agent.sh" "$WORKSPACE_ROOT" 2>/dev/null; then
+      jq -n '{
+        "decision": "stop",
+        "userMessage": "🌩️ Context full. Cloud Agent spawned to continue."
+      }'
+      exit 0
     fi
   fi
+  
+  # Local Mode - human must start new conversation
+  jq -n \
+    --argjson iter "$CURRENT_ITERATION" \
+    '{
+      "decision": "stop",
+      "userMessage": "⚠️ Context full. Start a NEW conversation: \"Continue Ralph from iteration " + ($iter|tostring) + "\""
+    }'
+  exit 0
 fi
 
-# Update progress with iteration summary
+# Case 4: Normal continue - still work to do
+NEXT_ITERATION=$((CURRENT_ITERATION + 1))
+
 cat >> "$PROGRESS_FILE" <<EOF
 
 ---
 
 ## Iteration $CURRENT_ITERATION Summary
-- Ended: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-- Context status: Healthy
-- Status: Continuing to iteration $NEXT_ITERATION
+- Ended: $TIMESTAMP
+- Context: $ALLOCATED_TOKENS tokens (healthy)
+- Criteria remaining: $UNCHECKED_CRITERIA
+- Status: Continuing...
 
 EOF
 
-# Read the task body for continuation
-TASK_BODY=$(awk '/^---$/{i++; next} i>=2' "$TASK_FILE")
+cat > "$STATE_FILE" <<EOF
+---
+iteration: $NEXT_ITERATION
+status: active
+started_at: $TIMESTAMP
+---
 
-# Build the continuation prompt - use cross-platform grep
-ALLOCATED_TOKENS=$(grep 'Allocated:' "$CONTEXT_LOG" 2>/dev/null | grep -o '[0-9]*' | head -1 || echo "unknown")
+# Ralph State
 
-SYSTEM_MSG="🔄 Ralph Iteration $NEXT_ITERATION (same context)
+Iteration $NEXT_ITERATION - Active
+EOF
 
-## Continue Working
+# Build continuation message
+CONTINUE_MSG="🔄 Iteration $NEXT_ITERATION
 
-Read .ralph/progress.md to see what was accomplished.
-Check .ralph/guardrails.md for any new signs added.
+$UNCHECKED_CRITERIA criteria remaining. Continue working on the next unchecked item in RALPH_TASK.md."
 
-## Context Status
-- Allocated: $ALLOCATED_TOKENS tokens
-- Status: Healthy (continuing in same context)
+if [[ -n "$TEST_COMMAND" ]]; then
+  CONTINUE_MSG="$CONTINUE_MSG
 
-## Reminders
-- Update progress.md with your work
-- Commit checkpoints frequently
-- Say RALPH_COMPLETE when ALL criteria in RALPH_TASK.md are met
-- Say RALPH_GUTTER if stuck on the same issue repeatedly"
+**Run tests after changes:** \`$TEST_COMMAND\`
+Tests must pass for the task to be complete."
+fi
 
-# Output JSON to block exit and continue
 jq -n \
-  --arg prompt "$TASK_BODY" \
-  --arg msg "$SYSTEM_MSG" \
+  --arg msg "$CONTINUE_MSG" \
   '{
     "decision": "block",
-    "reason": $prompt,
-    "systemMessage": $msg
+    "agentMessage": $msg
   }'
 
 exit 0

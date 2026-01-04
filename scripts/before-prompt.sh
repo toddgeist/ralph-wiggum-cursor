@@ -2,7 +2,7 @@
 # Ralph Wiggum: Before Prompt Hook
 # - Updates iteration count in state.md
 # - Adds iteration marker to progress.md
-# - Injects guardrails into agent context
+# - Injects guardrails AND test requirements into agent context
 
 set -euo pipefail
 
@@ -58,8 +58,6 @@ EOF
   cat > "$RALPH_DIR/guardrails.md" <<EOF
 # Ralph Guardrails (Signs)
 
-These are lessons learned from previous iterations. Follow these to avoid known pitfalls.
-
 ## Core Signs
 
 ### Sign: Read Before Writing
@@ -67,9 +65,10 @@ These are lessons learned from previous iterations. Follow these to avoid known 
 
 ### Sign: Test After Changes
 - Run tests after every significant change
+- Task is NOT complete until tests pass
 
 ### Sign: Commit Checkpoints
-- Commit working states before attempting risky changes
+- Commit working states before risky changes
 
 ### Sign: One Thing at a Time
 - Focus on one criterion at a time
@@ -78,14 +77,10 @@ These are lessons learned from previous iterations. Follow these to avoid known 
 
 ## Learned Signs
 
-(Signs added from observed failures will appear below)
-
 EOF
 
   cat > "$RALPH_DIR/context-log.md" <<EOF
 # Context Allocation Log (Hook-Managed)
-
-> ⚠️ This file is managed by hooks. Do not edit manually.
 
 ## Current Session
 
@@ -102,7 +97,6 @@ EOF
 
   cat > "$RALPH_DIR/edits.log" <<EOF
 # Edit Log (Hook-Managed)
-# This file is append-only. Do not edit manually.
 # Format: TIMESTAMP | FILE | CHANGE_TYPE | CHARS | ITERATION
 
 EOF
@@ -117,15 +111,10 @@ EOF
 
 ## Recent Failures
 
-(Failures will be logged here by hooks)
-
 EOF
 
   cat > "$RALPH_DIR/progress.md" <<EOF
 # Progress Log
-
-> This file tracks incremental progress. Hooks append checkpoints automatically.
-> You can also add your own notes and summaries.
 
 ---
 
@@ -145,7 +134,19 @@ CURRENT_ITERATION=$(grep '^iteration:' "$STATE_FILE" 2>/dev/null | sed 's/iterat
 NEXT_ITERATION=$((CURRENT_ITERATION + 1))
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# Update state.md - rewrite the whole file to avoid sed issues
+# =============================================================================
+# EXTRACT TEST COMMAND FROM TASK
+# =============================================================================
+
+TEST_COMMAND=""
+if grep -q "^test_command:" "$TASK_FILE" 2>/dev/null; then
+  TEST_COMMAND=$(grep "^test_command:" "$TASK_FILE" | sed 's/test_command: *//' | sed 's/^["'"'"']//' | sed 's/["'"'"']$//' | xargs)
+fi
+
+# =============================================================================
+# UPDATE STATE
+# =============================================================================
+
 cat > "$STATE_FILE" <<EOF
 ---
 iteration: $NEXT_ITERATION
@@ -168,7 +169,10 @@ cat >> "$PROGRESS_FILE" <<EOF
 
 EOF
 
-# Check context health
+# =============================================================================
+# CHECK CONTEXT HEALTH
+# =============================================================================
+
 ESTIMATED_TOKENS=$(grep 'Allocated:' "$CONTEXT_LOG" 2>/dev/null | grep -o '[0-9]*' | head -1 || echo "0")
 if [[ -z "$ESTIMATED_TOKENS" ]]; then
   ESTIMATED_TOKENS=0
@@ -178,41 +182,79 @@ WARN_THRESHOLD=$((THRESHOLD * 80 / 100))
 
 CONTEXT_WARNING=""
 if [[ "$ESTIMATED_TOKENS" -gt "$WARN_THRESHOLD" ]]; then
-  CONTEXT_WARNING="⚠️ CONTEXT WARNING: Approaching limit ($ESTIMATED_TOKENS tokens). Consider starting fresh."
+  CONTEXT_WARNING="⚠️ CONTEXT WARNING: $ESTIMATED_TOKENS tokens used. Approaching limit."
 fi
 
-# Read learned guardrails
+# =============================================================================
+# READ GUARDRAILS
+# =============================================================================
+
 GUARDRAILS=""
 if [[ -f "$GUARDRAILS_FILE" ]]; then
   GUARDRAILS=$(sed -n '/## Learned Signs/,$ p' "$GUARDRAILS_FILE" | tail -n +3)
 fi
 
-# Build agent message
+# =============================================================================
+# CHECK FOR PREVIOUS TEST FAILURES
+# =============================================================================
+
+LAST_TEST_FAILURE=""
+if [[ -f "$RALPH_DIR/.last_test_output" ]]; then
+  LAST_TEST_FAILURE=$(cat "$RALPH_DIR/.last_test_output" | head -30)
+fi
+
+# =============================================================================
+# BUILD AGENT MESSAGE
+# =============================================================================
+
 AGENT_MSG="🔄 **Ralph Iteration $NEXT_ITERATION**
 
 $CONTEXT_WARNING
 
 ## Your Task
-Read RALPH_TASK.md for the full task description and completion criteria.
+Read RALPH_TASK.md for the task description and completion criteria.
 
 ## Key Files
-- \`.ralph/progress.md\` - Incremental progress (hooks append checkpoints)
+- \`.ralph/progress.md\` - What's been done
 - \`.ralph/guardrails.md\` - Signs to follow
-- \`.ralph/edits.log\` - Raw edit history
+- \`.ralph/edits.log\` - Edit history"
+
+# Add test command prominently if defined
+if [[ -n "$TEST_COMMAND" ]]; then
+  AGENT_MSG="$AGENT_MSG
+
+## ⚠️ IMPORTANT: Test-Driven Completion
+**Test command:** \`$TEST_COMMAND\`
+
+- Run tests AFTER making changes
+- Task is NOT complete until tests pass
+- Checking boxes is not enough - tests must verify"
+
+  if [[ -n "$LAST_TEST_FAILURE" ]]; then
+    AGENT_MSG="$AGENT_MSG
+
+### Last Test Output:
+\`\`\`
+$LAST_TEST_FAILURE
+\`\`\`"
+  fi
+fi
+
+AGENT_MSG="$AGENT_MSG
 
 ## Ralph Protocol
-1. Read progress.md to see what's been done
-2. Check guardrails.md for signs to follow
-3. Work on the NEXT incomplete criterion from RALPH_TASK.md
-4. Update progress.md with notes as you work
-5. Commit your changes with descriptive messages
-6. When ALL criteria are met, say: \"RALPH_COMPLETE: All criteria satisfied\"
-7. If stuck on same issue 3+ times, say: \"RALPH_GUTTER: Need fresh context\"
+1. Read progress.md to see what's done
+2. Work on the next unchecked criterion in RALPH_TASK.md
+3. Run tests: \`$TEST_COMMAND\`
+4. If tests pass, check off the criterion
+5. Repeat until all criteria pass tests
+6. When ALL criteria are [x] AND tests pass: \`RALPH_COMPLETE\`
+7. If stuck 3+ times on same issue: \`RALPH_GUTTER\`
 
-## Current Guardrails
+## Guardrails
 $GUARDRAILS
 
-Remember: Progress is tracked in FILES, not in context. Hooks automatically log your edits."
+**Remember: Tests determine completion, not checkboxes.**"
 
 jq -n \
   --arg msg "$AGENT_MSG" \

@@ -1,5 +1,6 @@
 ---
 task: Build "ts-narrow" - A TypeScript Type Narrowing Debugger
+test_command: "npm test"
 completion_criteria:
   - CLI parses TypeScript files
   - Tracks type of a variable through control flow
@@ -23,28 +24,22 @@ TypeScript's type narrowing is powerful but opaque. When narrowing doesn't work 
 A CLI that traces a variable through code and explains each narrowing step:
 
 ```bash
-$ ts-narrow analyze src/example.ts --variable user --line 15
+$ npx ts-node src/index.ts analyze test/truthiness.ts --variable x --line 4
 ```
 
 Output:
 ```
-Tracing `user` in src/example.ts
+Tracing `x` in test/truthiness.ts
 
-Line 3:  const user: User | null = getUser()
-         → Type: User | null
+Line 1:  function example(x: string | null) {
+         → Type: string | null (function parameter)
 
-Line 5:  if (user) {
+Line 2:  if (x) {
          → Narrowed by: truthiness check
-         → Type: User (inside if block)
-         → Eliminated: null (falsy)
+         → Type: string
+         → Eliminated: null
 
-Line 8:  if (user.role === 'admin') {
-         → Narrowed by: equality check on discriminant
-         → Type: AdminUser (inside if block)
-
-Line 15: user.permissions
-         → Final type: AdminUser
-         → Property 'permissions' exists ✓
+Final type at line 4: string
 ```
 
 ## Technical Approach
@@ -81,7 +76,7 @@ Use the TypeScript Compiler API to:
 14. [ ] Generates step-by-step trace output
 15. [ ] Explains what caused each narrowing
 16. [ ] Shows what types were eliminated
-17. [ ] Highlights the final type at target line
+17. [ ] Highlights the final type at target line (MUST reflect narrowed scope)
 18. [ ] Handles "type not narrowed" cases with explanation
 
 ### Phase 5: Edge Cases & Polish
@@ -91,71 +86,76 @@ Use the TypeScript Compiler API to:
 22. [ ] Provides helpful error for invalid inputs
 23. [ ] Has --json output option for tooling
 
-## Example Test Cases
+## Test Cases (npm test must pass ALL)
 
-### Test 1: Basic Truthiness
+Create `test/` directory with these files and a test runner.
+
+### test/truthiness.ts
 ```typescript
-// test/truthiness.ts
 function example(x: string | null) {
   if (x) {
-    console.log(x.toUpperCase()) // x is string here
+    console.log(x.toUpperCase()) // x is string here, line 4
   }
 }
 ```
 
-Expected output for `ts-narrow analyze test/truthiness.ts --variable x --line 4`:
-```
-Line 1: function example(x: string | null)
-        → Type: string | null (parameter)
+**Expected:** `ts-narrow analyze test/truthiness.ts --variable x --line 4` outputs `Final type at line 4: string`
 
-Line 2: if (x) {
-        → Narrowed by: truthiness check
-        → Type: string
-        → Eliminated: null (falsy)
-
-Line 3: x.toUpperCase()
-        → Final type: string ✓
-```
-
-### Test 2: typeof Guard
+### test/typeof.ts
 ```typescript
-// test/typeof.ts
 function process(value: string | number) {
   if (typeof value === 'string') {
-    return value.toUpperCase()
+    return value.toUpperCase() // value is string here, line 4
   }
-  return value.toFixed(2)
+  return value.toFixed(2) // value is number here, line 6
 }
 ```
 
-### Test 3: Discriminated Union
+**Expected:** Line 4 → `string`, Line 6 → `number`
+
+### test/discriminated.ts
 ```typescript
-// test/discriminated.ts
 type Result = 
   | { ok: true; data: string }
   | { ok: false; error: Error }
 
 function handle(result: Result) {
   if (result.ok) {
-    console.log(result.data) // result is { ok: true; data: string }
+    console.log(result.data) // line 8
   } else {
-    console.log(result.error) // result is { ok: false; error: Error }
+    console.log(result.error) // line 10
   }
 }
 ```
 
-### Test 4: No Narrowing (Negative Case)
+**Expected:** Line 8 → `{ ok: true; data: string }`, Line 10 → `{ ok: false; error: Error }`
+
+### test/no-narrow.ts
 ```typescript
-// test/no-narrow.ts
 function broken(x: string | null) {
-  const y = x // y is still string | null
+  const y = x
   if (x) {
-    console.log(y.toUpperCase()) // ERROR: y wasn't narrowed!
+    console.log(y.toUpperCase()) // y is still string | null, line 5
   }
 }
 ```
 
-Expected: Tool should explain that `y` was not narrowed because the check was on `x`, not `y`.
+**Expected:** Line 5 → `string | null` (y was not narrowed, only x was)
+
+## Test Runner (package.json)
+
+```json
+{
+  "scripts": {
+    "test": "node test/run-tests.js"
+  }
+}
+```
+
+Create `test/run-tests.js` that:
+1. Runs ts-narrow on each test file
+2. Verifies output matches expected
+3. Exits 0 if all pass, 1 if any fail
 
 ## File Structure
 
@@ -172,7 +172,8 @@ ts-narrow/
 │   ├── truthiness.ts
 │   ├── typeof.ts
 │   ├── discriminated.ts
-│   └── no-narrow.ts
+│   ├── no-narrow.ts
+│   └── run-tests.js      # Test runner
 ├── package.json
 ├── tsconfig.json
 └── README.md
@@ -189,16 +190,17 @@ ts-narrow/
 - No external dependencies except `typescript` itself
 - Must handle real-world TypeScript (not toy examples only)
 - Output must be human-readable, not just type dumps
+- **Tests must pass - checking boxes is not enough**
 
 ---
 
 ## Ralph Instructions
 
 1. Work through phases in order - don't skip ahead
-2. Each criterion should have a working test before moving on
-3. Commit after completing each criterion
-4. If stuck on TypeScript Compiler API, read the docs at:
+2. **Run `npm test` after each change** - this is mandatory
+3. A criterion is only complete when tests verify it
+4. Commit after completing each criterion
+5. If stuck on TypeScript Compiler API, read:
    https://github.com/microsoft/TypeScript/wiki/Using-the-Compiler-API
-5. The `ts.TypeChecker` and `ts.Type` APIs are your friends
-6. When ALL criteria are [x], say: `RALPH_COMPLETE: All criteria satisfied`
-7. If stuck on same issue 3+ times, say: `RALPH_GUTTER: Need fresh context`
+6. When ALL criteria are [x] AND `npm test` passes: `RALPH_COMPLETE`
+7. If stuck on same issue 3+ times: `RALPH_GUTTER`
