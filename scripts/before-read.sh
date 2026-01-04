@@ -16,9 +16,10 @@ sedi() {
 # Read hook input from stdin
 HOOK_INPUT=$(cat)
 
-# Extract file info
-FILE_PATH=$(echo "$HOOK_INPUT" | jq -r '.file_path // ""')
-CONTENT=$(echo "$HOOK_INPUT" | jq -r '.content // ""')
+# Extract file info - Cursor may send different field names
+# Try multiple possible field names
+FILE_PATH=$(echo "$HOOK_INPUT" | jq -r '.file_path // .path // ""')
+CONTENT=$(echo "$HOOK_INPUT" | jq -r '.content // .file_content // ""')
 WORKSPACE_ROOT=$(echo "$HOOK_INPUT" | jq -r '.workspace_roots[0] // "."')
 
 RALPH_DIR="$WORKSPACE_ROOT/.ralph"
@@ -30,9 +31,18 @@ if [[ ! -d "$RALPH_DIR" ]]; then
   exit 0
 fi
 
-# Estimate token count (rough: ~4 chars per token)
-CONTENT_LENGTH=${#CONTENT}
-ESTIMATED_TOKENS=$((CONTENT_LENGTH / 4))
+# Estimate token count
+# If content is provided, use it; otherwise estimate from file size
+if [[ -n "$CONTENT" ]]; then
+  CONTENT_LENGTH=${#CONTENT}
+  ESTIMATED_TOKENS=$((CONTENT_LENGTH / 4))
+elif [[ -f "$FILE_PATH" ]]; then
+  # Fall back to reading file size
+  FILE_SIZE=$(wc -c < "$FILE_PATH" 2>/dev/null || echo "0")
+  ESTIMATED_TOKENS=$((FILE_SIZE / 4))
+else
+  ESTIMATED_TOKENS=100  # Default estimate
+fi
 
 # Log the file read
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)

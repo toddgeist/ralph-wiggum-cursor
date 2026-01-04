@@ -16,14 +16,28 @@ sedi() {
 # Read hook input from stdin
 HOOK_INPUT=$(cat)
 
-# Extract workspace root
-WORKSPACE_ROOT=$(echo "$HOOK_INPUT" | jq -r '.workspace_roots[0] // "."')
+# Extract workspace root - try multiple possible field names
+WORKSPACE_ROOT=$(echo "$HOOK_INPUT" | jq -r '.workspace_roots[0] // .cwd // "."')
+
+# If workspace_roots is empty or ".", try to find it from the prompt
+if [[ "$WORKSPACE_ROOT" == "." ]] || [[ -z "$WORKSPACE_ROOT" ]]; then
+  # Check if we're in a directory with RALPH_TASK.md
+  if [[ -f "./RALPH_TASK.md" ]]; then
+    WORKSPACE_ROOT="."
+  else
+    # Can't determine workspace, pass through
+    echo '{"continue": true}'
+    exit 0
+  fi
+fi
+
 RALPH_DIR="$WORKSPACE_ROOT/.ralph"
 TASK_FILE="$WORKSPACE_ROOT/RALPH_TASK.md"
 
 # Check if Ralph is active
 if [[ ! -f "$TASK_FILE" ]]; then
   # No Ralph task - pass through
+  echo '{"continue": true}'
   exit 0
 fi
 
@@ -131,15 +145,19 @@ GUARDRAILS_FILE="$RALPH_DIR/guardrails.md"
 CONTEXT_LOG="$RALPH_DIR/context-log.md"
 
 # Extract current iteration
-CURRENT_ITERATION=$(grep '^iteration:' "$STATE_FILE" | sed 's/iteration: *//' || echo "0")
+CURRENT_ITERATION=$(grep '^iteration:' "$STATE_FILE" 2>/dev/null | sed 's/iteration: *//' || echo "0")
 NEXT_ITERATION=$((CURRENT_ITERATION + 1))
 
-# Update iteration count
+# Update iteration count and status
 sedi "s/^iteration: .*/iteration: $NEXT_ITERATION/" "$STATE_FILE"
 sedi "s/^status: .*/status: active/" "$STATE_FILE"
 
+# Also update the text description in state.md
+sedi "s/Waiting for first iteration to begin./Iteration $NEXT_ITERATION in progress./" "$STATE_FILE"
+sedi "s/Iteration [0-9]* in progress./Iteration $NEXT_ITERATION in progress./" "$STATE_FILE"
+
 # Check context health (cross-platform)
-ESTIMATED_TOKENS=$(grep 'Allocated:' "$CONTEXT_LOG" | grep -o '[0-9]*' | head -1 || echo "0")
+ESTIMATED_TOKENS=$(grep 'Allocated:' "$CONTEXT_LOG" 2>/dev/null | grep -o '[0-9]*' | head -1 || echo "0")
 if [[ -z "$ESTIMATED_TOKENS" ]]; then
   ESTIMATED_TOKENS=0
 fi
@@ -186,8 +204,6 @@ $GUARDRAILS
 Remember: Progress is tracked in FILES, not in context. Always update progress.md."
 
 # Output JSON response
-# Note: beforeSubmitPrompt currently may not support modification in Cursor
-# This is here for future compatibility and logging purposes
 jq -n \
   --arg msg "$AGENT_MSG" \
   '{
