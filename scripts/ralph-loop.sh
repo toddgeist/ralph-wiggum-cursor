@@ -34,12 +34,13 @@ MODEL="${RALPH_MODEL:-$DEFAULT_MODEL}"
 # =============================================================================
 
 # Spinner to show the loop is alive (not frozen)
+# Outputs to stderr so it's not captured by $()
 spinner() {
   local workspace="$1"
   local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local i=0
   while true; do
-    printf "\r  🐛 Agent working... %s  (watch: tail -f %s/.ralph/activity.log)" "${spin:i++%${#spin}:1}" "$workspace"
+    printf "\r  🐛 Agent working... %s  (watch: tail -f %s/.ralph/activity.log)" "${spin:i++%${#spin}:1}" "$workspace" >&2
     sleep 0.1
   done
 }
@@ -151,9 +152,11 @@ Before doing anything:
 
 Ralph's strength is state-in-git, not LLM memory. Commit early and often:
 
-1. After completing each criterion: \`git add -A && git commit -m 'ralph: <description>'\`
-   - Example: \`git commit -m 'ralph: implement state tracker with AST parsing'\`
-   - NEVER use placeholder text like '[criterion]' - describe what you actually did
+1. After completing each criterion, commit your changes:
+   \`git add -A && git commit -m 'ralph: implement state tracker'\`
+   \`git add -A && git commit -m 'ralph: fix async race condition'\`
+   \`git add -A && git commit -m 'ralph: add CLI adapter with commander'\`
+   Always describe what you actually did - never use placeholders like '<description>'
 2. After any significant code change (even partial): commit with descriptive message
 3. Before any risky refactor: commit current state as checkpoint
 4. Push after every 2-3 commits: \`git push\`
@@ -231,14 +234,15 @@ run_iteration() {
   rm -f "$fifo"
   mkfifo "$fifo"
   
-  echo ""
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo "🐛 Ralph Iteration $iteration"
-  echo "═══════════════════════════════════════════════════════════════════"
-  echo ""
-  echo "Workspace: $workspace"
-  echo "Monitor:   tail -f $workspace/.ralph/activity.log"
-  echo ""
+  # Use stderr for display (stdout is captured for signal)
+  echo "" >&2
+  echo "═══════════════════════════════════════════════════════════════════" >&2
+  echo "🐛 Ralph Iteration $iteration" >&2
+  echo "═══════════════════════════════════════════════════════════════════" >&2
+  echo "" >&2
+  echo "Workspace: $workspace" >&2
+  echo "Monitor:   tail -f $workspace/.ralph/activity.log" >&2
+  echo "" >&2
   
   # Log session start to progress.md
   log_progress "$workspace" "**Session $iteration started** (model: $MODEL)"
@@ -247,7 +251,7 @@ run_iteration() {
   local cmd="cursor-agent -p --force --output-format stream-json --model $MODEL"
   
   if [[ -n "$session_id" ]]; then
-    echo "Resuming session: $session_id"
+    echo "Resuming session: $session_id" >&2
     cmd="$cmd --resume=\"$session_id\""
   fi
   
@@ -271,21 +275,20 @@ run_iteration() {
   while IFS= read -r line < "$fifo"; do
     case "$line" in
       "ROTATE")
-        printf "\r\033[K"  # Clear spinner line
-        echo "🔄 Context rotation triggered - stopping agent..."
+        printf "\r\033[K" >&2  # Clear spinner line
+        echo "🔄 Context rotation triggered - stopping agent..." >&2
         kill $agent_pid 2>/dev/null || true
         signal="ROTATE"
         break
         ;;
       "WARN")
-        printf "\r\033[K"  # Clear spinner line
-        echo "⚠️  Context warning - agent should wrap up soon..."
+        printf "\r\033[K" >&2  # Clear spinner line
+        echo "⚠️  Context warning - agent should wrap up soon..." >&2
         # Send interrupt to encourage wrap-up (agent continues but is notified)
-        # Restart spinner display
         ;;
       "GUTTER")
-        printf "\r\033[K"  # Clear spinner line
-        echo "🚨 Gutter detected - agent may be stuck..."
+        printf "\r\033[K" >&2  # Clear spinner line
+        echo "🚨 Gutter detected - agent may be stuck..." >&2
         signal="GUTTER"
         # Don't kill yet, let agent try to recover
         ;;
@@ -298,7 +301,7 @@ run_iteration() {
   # Stop spinner and clear line
   kill $spinner_pid 2>/dev/null || true
   wait $spinner_pid 2>/dev/null || true
-  printf "\r\033[K"  # Clear spinner line
+  printf "\r\033[K" >&2  # Clear spinner line
   
   # Cleanup
   rm -f "$fifo"
