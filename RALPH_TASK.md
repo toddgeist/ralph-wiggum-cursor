@@ -8,5 +8,5 @@ max_iterations: 5
 
 ## Success Criteria
 
-1. [ ] First thing
-2. [ ] Second thing
+1. [x] First thing
+2. [x] Second thing
