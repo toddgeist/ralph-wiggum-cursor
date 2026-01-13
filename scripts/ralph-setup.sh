@@ -189,7 +189,7 @@ main() {
   if [[ "$HAS_GUM" == "true" ]]; then
     echo "  Using gum for enhanced UI ✨"
   else
-    echo "  💡 Install gum for a better experience: brew install gum"
+    echo "  💡 Install gum for a better experience: https://github.com/charmbracelet/gum#installation"
   fi
   echo ""
   

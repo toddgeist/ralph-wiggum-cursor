@@ -78,7 +78,7 @@ This creates two problems:
 |-------------|-------|---------------|
 | **Git repo** | `git status` works | `git init` |
 | **cursor-agent CLI** | `which cursor-agent` | `curl https://cursor.com/install -fsS \| bash` |
-| **gum** (optional) | `which gum` | `brew install gum` - for enhanced UI |
+| **gum** (optional) | `which gum` | Installer offers to install, or `brew install gum` |
 
 ## Quick Start
 
@@ -107,11 +107,11 @@ your-project/
 └── RALPH_TASK.md               # Your task definition
 ```
 
-### 2. (Optional) Install gum for Enhanced UI
+### 2. (Optional) gum for Enhanced UI
 
-```bash
-brew install gum
-```
+The installer will offer to install gum automatically. You can also:
+- Skip the prompt and auto-install: `curl ... | INSTALL_GUM=1 bash`
+- Install manually: `brew install gum` (macOS) or see [gum installation](https://github.com/charmbracelet/gum#installation)
 
 With gum, you get a beautiful interactive menu for selecting models and options:
 

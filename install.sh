@@ -27,6 +27,50 @@ if ! command -v cursor-agent &> /dev/null; then
   echo ""
 fi
 
+# Check for gum and offer to install
+if ! command -v gum &> /dev/null; then
+  echo "📦 gum not found (provides beautiful CLI menus)"
+  
+  # Auto-install if INSTALL_GUM=1 or prompt user
+  SHOULD_INSTALL=""
+  if [[ "${INSTALL_GUM:-}" == "1" ]]; then
+    SHOULD_INSTALL="y"
+  else
+    read -p "   Install gum? [y/N] " -n 1 -r < /dev/tty
+    echo
+    SHOULD_INSTALL="$REPLY"
+  fi
+  
+  if [[ "$SHOULD_INSTALL" =~ ^[Yy]$ ]]; then
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      if command -v brew &> /dev/null; then
+        echo "   Installing via Homebrew..."
+        brew install gum
+      else
+        echo "   ⚠️  Homebrew not found. Install manually: brew install gum"
+      fi
+    elif [[ -f /etc/debian_version ]]; then
+      echo "   Installing via apt..."
+      sudo mkdir -p /etc/apt/keyrings
+      curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+      echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
+      sudo apt update && sudo apt install -y gum
+    elif [[ -f /etc/fedora-release ]] || [[ -f /etc/redhat-release ]]; then
+      echo "   Installing via dnf..."
+      echo '[charm]
+name=Charm
+baseurl=https://repo.charm.sh/yum/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.charm.sh/yum/gpg.key' | sudo tee /etc/yum.repos.d/charm.repo
+      sudo dnf install -y gum
+    else
+      echo "   ⚠️  Unknown Linux distro. Install manually: https://github.com/charmbracelet/gum#installation"
+    fi
+  fi
+  echo ""
+fi
+
 WORKSPACE_ROOT="$(pwd)"
 
 # =============================================================================
@@ -220,14 +264,6 @@ echo "✓ Updated .gitignore"
 # SUMMARY
 # =============================================================================
 
-# Check for gum
-HAS_GUM=""
-if command -v gum &> /dev/null; then
-  HAS_GUM="✓"
-else
-  HAS_GUM="✗"
-fi
-
 echo ""
 echo "═══════════════════════════════════════════════════════════════════"
 echo "✅ Ralph installed!"
@@ -248,9 +284,6 @@ echo "     ├── activity.log            - Tool call log"
 echo "     └── errors.log              - Failure log"
 echo ""
 echo "  📄 RALPH_TASK.md               - Your task definition (edit this!)"
-echo ""
-echo "Optional dependency:"
-echo "  [$HAS_GUM] gum - Beautiful CLI menus (brew install gum)"
 echo ""
 echo "Next steps:"
 echo "  1. Edit RALPH_TASK.md to define your actual task"
